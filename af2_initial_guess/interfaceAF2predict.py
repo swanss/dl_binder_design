@@ -46,7 +46,10 @@ def get_args():
                         help="silent file to predict")
     parser.add_argument("-recycle", dest="recycle", type=int, default=3,
                         help="Number of recycle iterations to perform")
-
+    parser.add_argument("-af_dir", dest="af_dir", type=str,
+                        help="The directory containing alphafold 'params/'")
+    parser.add_argument("-strict", dest="strict", action='store_true',
+                        help="If provided, will terminate if a provided structure does not pass formatting checks")
     args = parser.parse_args()
     return args
 
@@ -66,7 +69,7 @@ model_config.data.common.max_extra_msa = 5
 model_config.data.eval.max_msa_clusters = 5
 
 # TODO change this dir
-model_params = data.get_model_haiku_params(model_name=model_name, data_dir="/projects/ml/alphafold") # CHANGE THIS (directory where "params/ folder is")
+model_params = data.get_model_haiku_params(model_name=model_name, data_dir=args.af_dir)
 model_runner = model.RunModel(model_config, model_params)
 
 def range1(size): return range(1, size+1)
@@ -452,16 +455,16 @@ def input_check( pdbfile, tag ):
             # Only checking residue index at CA atom
             residx = line[22:27].strip()
             if residx in seen_indices:
-                sys.exit( f"\nNon-unique residue indices detected for tag: {tag}. " +
-                "This will cause AF2 to yield garbage outputs. Exiting." )
-
+                print(f"\nNon-unique residue indices detected for tag: {tag}. This will cause AF2 to yield garbage outputs. Exiting.")
+                return False
             seen_indices.add(residx)
 
         if ( not line[21:22].strip() == "A" ) and chain1:
-            sys.exit( f"\nThe first chain in the pose must be the binder and it must be chain A. " +
-                    f"Tag: {tag} does not satisfy this requirement. Exiting." )
+            print(f"\nThe first chain in the pose must be the binder and it must be chain A. Tag: {tag} does not satisfy this requirement. Exiting.")
+            return False
+    return True
 
-def featurize(tag, sfd_in):
+def featurize(tag, sfd_in, strict):
   
     # dump pdb
     pose = Pose()
@@ -473,7 +476,12 @@ def featurize(tag, sfd_in):
     # - All residue indices are unique
     # - The first chain is "A"
     
-    input_check(tmppdb, tag)
+    success = input_check(tmppdb, tag)
+    if (strict and not success):
+       sys.exit("Issue with input structure when strict mode is set, exiting")
+    elif not success:
+        print("Skipping structure....")
+        return None, None, None
     
     feature_dict, initial_guess, binderlen = generate_feature_dict(tmppdb)
     feature_dict = model_runner.process_features(feature_dict, random_seed=0)
@@ -522,7 +530,9 @@ for idx,tag in enumerate(alltags):
     print( f"SKIPPING {tag}, since it was already run" )
     continue
   
-  feature_dict, initial_guess, binderlen = featurize(tag, sfd_in)
+  feature_dict, initial_guess, binderlen = featurize(tag, sfd_in, args.strict)
+  if feature_dict is None:
+    continue
   predict_structure(tag, feature_dict, binderlen, initial_guess, sfd_out, scorefilename)
 
   record_checkpoint( tag, checkpoint_filename )
