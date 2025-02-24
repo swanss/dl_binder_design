@@ -50,10 +50,12 @@ def get_args():
                         help="The directory containing alphafold 'params/'")
     parser.add_argument("-strict", dest="strict", action='store_true',
                         help="If provided, will terminate if a provided structure does not pass formatting checks")
+    parser.add_argument("-job_index", dest="job_index", type=int, default=0)
     args = parser.parse_args()
     return args
 
 args = get_args()
+print(args)
 
 model_name = "model_1_ptm"
 
@@ -309,7 +311,7 @@ def generate_scoredict( outtag, start_time, binderlen, prediction_result, scoref
 
   return score_dict, plddt_array 
 
-def process_output( tag, binderlen, start, feature_dict, prediction_result, sfd_out, scorefilename ):
+def process_output( tag, binderlen, start, feature_dict, prediction_result, sfd_out, scorefilename, job_index):
     structure_module = prediction_result['structure_module']
     this_protein = protein.Protein(
         aatype=feature_dict['aatype'][0],
@@ -330,12 +332,12 @@ def process_output( tag, binderlen, start, feature_dict, prediction_result, sfd_
     unrelaxed_pdb_lines = protein.to_pdb(this_protein)
     
     outtag = f'{tag}_af2pred'
-    unrelaxed_pdb_path = f'temp_af2output.pdb'
+    unrelaxed_pdb_path = f'temp_af2output_{tag}.pdb'
     with open(unrelaxed_pdb_path, 'w') as f: f.write(unrelaxed_pdb_lines)
     
     score_dict, plddt_array = generate_scoredict( outtag, start, binderlen, confidences, scorefilename )
     
-    add2silent( outtag, unrelaxed_pdb_path, score_dict, plddt_array, binderlen, sfd_out )
+    add2silent( outtag, unrelaxed_pdb_path, score_dict, plddt_array, binderlen, sfd_out, job_index)
     os.remove( unrelaxed_pdb_path )
 
 def insert_truncations(residue_index, Ls):
@@ -346,12 +348,14 @@ def insert_truncations(residue_index, Ls):
 
     return residue_index
 
-def add2silent( tag, pdb, score_dict, plddt_array, binderlen, sfd_out ):
+def add2silent( tag, pdb, score_dict, plddt_array, binderlen, sfd_out, job_index):
     pose = pose_from_file( pdb )
 
     pose = insert_chainbreaks( pose, binderlen )
 
     info = pose.pdb_info()
+    if pose.size() != plddt_array.shape[0]:
+       raise ValueError(f"Structure has {pose.size()} residues, but pLDDT array has {plddt_array.shape[0]} values")
     for resi in range1( pose.size() ):
       info.add_reslabel(resi, f"{plddt_array[resi-1]}")
       for atom_i in range1( pose.residue(resi).natoms() ):
@@ -366,9 +370,9 @@ def add2silent( tag, pdb, score_dict, plddt_array, binderlen, sfd_out ):
         struct.add_energy(scorename, value, 1)
 
     sfd_out.add_structure( struct )
-    sfd_out.write_silent_struct( struct, "out.silent" )
+    sfd_out.write_silent_struct( struct, f"out_{job_index}.silent" )
 
-def predict_structure(tag, feature_dict, binderlen, initial_guess, sfd_out, scorefilename, random_seed=0):  
+def predict_structure(tag, feature_dict, binderlen, initial_guess, sfd_out, scorefilename, job_index, random_seed=0):  
     """Predicts structure using AlphaFold for the given sequence."""
     
     start = timer()
@@ -377,7 +381,7 @@ def predict_structure(tag, feature_dict, binderlen, initial_guess, sfd_out, scor
     
     prediction_result = model_runner.apply( model_runner.params, jax.random.PRNGKey(0), feature_dict, initial_guess)
     
-    process_output( tag, binderlen, start, feature_dict, prediction_result, sfd_out, scorefilename ) 
+    process_output( tag, binderlen, start, feature_dict, prediction_result, sfd_out, scorefilename, job_index) 
     
     print( f"Tag: {tag} reported success in {timer() - start} seconds" )
 
@@ -511,16 +515,16 @@ def determine_finished_structs( checkpoint_filename ):
 
 ################## Begin Main Function ##################
 
-sfd_out = core.io.silent.SilentFileData( "out.silent", False, False, "binary", core.io.silent.SilentFileOptions())
+sfd_out = core.io.silent.SilentFileData(f"out_{args.job_index}.silent", False, False, "binary", core.io.silent.SilentFileOptions())
 
 sfd_in = rosetta.core.io.silent.SilentFileData(rosetta.core.io.silent.SilentFileOptions())
 sfd_in.read_file(args.silent)
 
 alltags = silent_tools.get_silent_index(args.silent)["tags"]
-tmppdb = 'tmp.pdb'
+tmppdb = f"tmp_{args.job_index}.pdb"
 
-checkpoint_filename = "check.point"
-scorefilename = "out.sc"
+checkpoint_filename = f"checkpoint_{args.job_index}.txt"
+scorefilename = f"out_{args.job_index}.sc"
 
 finished_structs = determine_finished_structs( checkpoint_filename )
 
@@ -533,7 +537,7 @@ for idx,tag in enumerate(alltags):
   feature_dict, initial_guess, binderlen = featurize(tag, sfd_in, args.strict)
   if feature_dict is None:
     continue
-  predict_structure(tag, feature_dict, binderlen, initial_guess, sfd_out, scorefilename)
+  predict_structure(tag, feature_dict, binderlen, initial_guess, sfd_out, scorefilename, args.job_index)
 
   record_checkpoint( tag, checkpoint_filename )
 
